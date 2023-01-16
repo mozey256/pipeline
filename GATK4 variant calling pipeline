@@ -1,0 +1,89 @@
+#!/bin/bash
+
+#You need a reference file Bos_taurus.fa and the sequence reads 
+
+#Download a vcf file of all known variants
+
+#gunzip the file
+
+	gunzip bos_taurus.vcf.gz
+
+#Run the quality control (multiqc) for the sequence reads
+
+	multiqc . 
+
+#Index the reference genome
+
+	hisat2-build Bos_taurus.fa Bos_taurus.idx
+
+	samtools faidx Bos_taurus.fa
+ 
+	gatk CreateSequenceDictionary\
+                --REFERENCE Bos_taurus.fa\
+                --OUTPUT Bos_taurus.dict
+
+	gatk IndexFeatureFile -I bos_taurus.vcf
+
+
+#Create a txt file called bos_accession.txt and copy all your accesion numbers into that file
+
+#Run the following for loop
+
+for sample in `cat bos_accession.txt`;
+do
+
+#Define your variables
+ 
+	R1="${sample}"_1.fastq
+	R2="${sample}"_2.fastq
+
+#Align and get a sorted bam file output. Output it to HISAT2 dir
+
+	hisat2 -x Bos_taurus.idx -1 $R1 -2 $R2\
+		 --rg-id RG1 --rg "PL:ILLUMINA"\
+		 --rg SM:"${sample}" | samtools sort -\
+		 -o HISAT2/"${sample}"_sorted.bam
+
+#Index the sorted.bam files
+
+	samtools index HISAT2/"${sample}"_sorted.bam 
+
+#Mark duplicates
+
+	gatk MarkDuplicates\
+		 --INPUT HISAT2/"${sample}"_sorted.bam\
+		 --OUTPUT HISAT2/"${sample}"_sorted_dedup.bam\
+		 --METRICS_FILE HISAT2/"${sample}"_dup_metrics.txt\
+		 --REMOVE_DUPLICATES true  --CREATE_INDEX true
+
+#SplitNCigar Reads
+
+	gatk SplitNCigarReads\
+		 -I HISAT2/"${sample}"_sorted_dedup.bam\
+		 -O HISAT2/"${sample}"_cigarReads.bam -R Bos_taurus.fa
+
+#Base recalibration
+
+	gatk BaseRecalibrator\
+		 --input HISAT2/"${sample}"_cigarReads.bam\
+		 --output HISAT2/"${sample}"_baseRecal.table\
+		--reference Bos_taurus.fa\
+		--known-sites bos_taurus.vcf 
+
+#Apply BQSR
+
+	gatk ApplyBQSR\
+		--bqsr-recal-file HISAT2/"${sample}"_baseRecal.table\
+		--input HISAT2/"${sample}"_sorted_dedup.bam\
+		--output HISAT2/"${sample}"_BQSR.bam\
+		--reference Bos_taurus.fa
+
+#Variant calling
+
+	gatk HaplotypeCaller\
+		--reference Bos_taurus.fa\
+		--input HISAT2/"${sample}"_BQSR.bam\
+		--output HISAT2/"${sample}"_haplotype.g.vcf.gz\
+		--ERC GVCF
+
+done
